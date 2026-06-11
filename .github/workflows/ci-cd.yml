@@ -23,7 +23,7 @@ jobs:
     # 服务容器：启动 MySQL 数据库
     services:
       mysql:
-        image: mysql:${{ env.MYSQL_VERSION }}
+        image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: testpassword
           MYSQL_DATABASE: store
