@@ -1,0 +1,220 @@
+name: Spring Boot CI/CD Pipeline
+
+# 触发条件：仅在推送到 main 分支时触发
+on:
+  push:
+    branches: [ main ]
+  # 可选：也允许手动触发工作流
+  workflow_dispatch:
+
+# 环境变量配置
+env:
+  JAVA_VERSION: '11'
+  MYSQL_VERSION: '8.0'
+  DOCKER_IMAGE_NAME: store-application
+  PROJECT_DIR: './05_store'
+
+jobs:
+  # 第一阶段：构建与测试
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    # 服务容器：启动 MySQL 数据库
+    services:
+      mysql:
+        image: mysql:${{ env.MYSQL_VERSION }}
+        env:
+          MYSQL_ROOT_PASSWORD: testpassword
+          MYSQL_DATABASE: store
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      # 步骤1：检出代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 步骤2：设置 Java 环境
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      # 步骤3：验证 Java 和 Maven 版本
+      - name: Verify Java and Maven versions
+        run: |
+          java -version
+          mvn -version
+
+      # 步骤4：等待 MySQL 服务就绪
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 -P 3306 -u root -ptestpassword --silent; then
+              echo "MySQL is ready!"
+              exit 0
+            fi
+            echo "Waiting for MySQL... ($i/30)"
+            sleep 2
+          done
+          echo "MySQL failed to start"
+          exit 1
+
+      # 步骤5：创建测试数据库表结构（如果需要）
+      - name: Initialize database schema
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -ptestpassword store <<EOF
+          -- 在这里添加您的数据库初始化脚本
+          -- 例如：CREATE TABLE IF NOT EXISTS products (...);
+          -- 如果项目有 flyway 或 liquibase，可以跳过此步骤
+          EOF
+        continue-on-error: true
+
+      # 步骤6：编译项目
+      - name: Compile project
+        run: mvn clean compile -f ${{ env.PROJECT_DIR }}/pom.xml
+
+      # 步骤7：运行单元测试
+      - name: Run unit tests
+        run: mvn test -f ${{ env.PROJECT_DIR }}/pom.xml
+        env:
+          # 覆盖 application.yml 中的数据库配置，使用 GitHub Actions 提供的 MySQL 服务
+          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/store?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
+          SPRING_DATASOURCE_USERNAME: root
+          SPRING_DATASOURCE_PASSWORD: testpassword
+
+      # 步骤8：上传测试结果（可选）
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ env.PROJECT_DIR }}/target/surefire-reports/
+        continue-on-error: true
+
+      # 步骤9：打包应用
+      - name: Package application
+        run: mvn package -DskipTests -f ${{ env.PROJECT_DIR }}/pom.xml
+
+      # 步骤10：上传构建产物
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spring-boot-app
+          path: ${{ env.PROJECT_DIR }}/target/*.jar
+          retention-days: 5
+
+  # 第二阶段：构建 Docker 镜像
+  build-docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: build-and-test  # 依赖 build-and-test 任务成功完成
+    
+    steps:
+      # 步骤1：检出代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 步骤2：下载构建产物
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: spring-boot-app
+          path: ${{ env.PROJECT_DIR }}/target/
+
+      # 步骤3：设置 Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 步骤4：创建 Dockerfile（如果项目中不存在）
+      - name: Create Dockerfile
+        run: |
+          cat > ${{ env.PROJECT_DIR }}/Dockerfile <<'EOF'
+          # 使用 OpenJDK 11 作为基础镜像
+          FROM eclipse-temurin:11-jre-alpine
+
+          # 设置工作目录
+          WORKDIR /app
+
+          # 复制 JAR 文件到容器
+          COPY target/*.jar app.jar
+
+          # 暴露应用端口
+          EXPOSE 8080
+
+          # 健康检查
+          HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+            CMD wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1
+
+          # 启动应用
+          ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+          EOF
+
+      # 步骤5：构建 Docker 镜像
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.PROJECT_DIR }}
+          file: ${{ env.PROJECT_DIR }}/Dockerfile
+          push: false
+          tags: |
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.DOCKER_IMAGE_NAME }}:latest
+          load: true
+
+      # 步骤6：保存 Docker 镜像（可选，用于后续部署）
+      - name: Save Docker image
+        run: |
+          docker save ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} | gzip > docker-image.tar.gz
+
+      # 步骤7：上传 Docker 镜像
+      - name: Upload Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: docker-image.tar.gz
+          retention-days: 5
+
+      # 步骤8：输出镜像信息
+      - name: Display Docker image info
+        run: |
+          echo "Docker image built successfully!"
+          echo "Image name: ${{ env.DOCKER_IMAGE_NAME }}"
+          echo "Tag: ${{ github.sha }}"
+          docker images | grep ${{ env.DOCKER_IMAGE_NAME }}
+
+  # 第三阶段：部署（可选，需要配置部署环境）
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: .
+
+      # 这里可以添加实际的部署步骤
+      # 例如：推送到 Docker Hub、部署到 Kubernetes、部署到云服务器等
+      - name: Deploy notification
+        run: |
+          echo "Deployment stage completed!"
+          echo "In a real scenario, you would:"
+          echo "1. Push the Docker image to a registry (Docker Hub, ECR, GCR, etc.)"
+          echo "2. Deploy to your target environment (Kubernetes, ECS, VM, etc.)"
+          echo "3. Run health checks and smoke tests"
+          echo "4. Notify team members via Slack/Email/etc."

@@ -1,0 +1,44 @@
+spring:
+  application:
+    name: store
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/store?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: root
+    password: "20051114wyx"
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # HikariCP 连接池配置
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 15
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+server:
+  port: 8080
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  # Mapper XML 文件位置
+  mapper-locations: classpath*:mapper/**/*.xml
+  # 实体类包路径（开启驼峰命名转换等）
+  type-aliases-package: com.store.entity
+  configuration:
+    # 开启驼峰命名自动映射
+    map-underscore-to-camel-case: true
+    # 打印 SQL 日志（开发环境使用，生产环境关闭）
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      # 主键策略：自增
+      id-type: auto
+      # 逻辑删除字段
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# 日志级别
+logging:
+  level:
+    com.store: debug
