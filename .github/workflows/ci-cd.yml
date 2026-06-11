@@ -12,7 +12,7 @@ env:
   JAVA_VERSION: '11'
   MYSQL_VERSION: '8.0'
   DOCKER_IMAGE_NAME: store-application
-  PROJECT_DIR: './05_store'
+  PROJECT_DIR: '.'
 
 jobs:
   # 第一阶段：构建与测试
@@ -68,23 +68,19 @@ jobs:
           echo "MySQL failed to start"
           exit 1
 
-      # 步骤5：创建测试数据库表结构（如果需要）
+      # 步骤5：初始化数据库表结构
       - name: Initialize database schema
         run: |
-          mysql -h 127.0.0.1 -P 3306 -u root -ptestpassword store <<EOF
-          -- 在这里添加您的数据库初始化脚本
-          -- 例如：CREATE TABLE IF NOT EXISTS products (...);
-          -- 如果项目有 flyway 或 liquibase，可以跳过此步骤
-          EOF
-        continue-on-error: true
+          mysql -h 127.0.0.1 -P 3306 -u root -ptestpassword < store.sql
+        continue-on-error: false
 
       # 步骤6：编译项目
       - name: Compile project
-        run: mvn clean compile -f ${{ env.PROJECT_DIR }}/pom.xml
+        run: mvn clean compile
 
       # 步骤7：运行单元测试
       - name: Run unit tests
-        run: mvn test -f ${{ env.PROJECT_DIR }}/pom.xml
+        run: mvn test
         env:
           # 覆盖 application.yml 中的数据库配置，使用 GitHub Actions 提供的 MySQL 服务
           SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/store?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
@@ -97,19 +93,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: ${{ env.PROJECT_DIR }}/target/surefire-reports/
+          path: target/surefire-reports/
         continue-on-error: true
 
       # 步骤9：打包应用
       - name: Package application
-        run: mvn package -DskipTests -f ${{ env.PROJECT_DIR }}/pom.xml
+        run: mvn package -DskipTests
 
       # 步骤10：上传构建产物
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: spring-boot-app
-          path: ${{ env.PROJECT_DIR }}/target/*.jar
+          path: target/*.jar
           retention-days: 5
 
   # 第二阶段：构建 Docker 镜像
@@ -134,48 +130,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 步骤4：创建 Dockerfile（如果项目中不存在）
-      - name: Create Dockerfile
-        run: |
-          cat > ${{ env.PROJECT_DIR }}/Dockerfile <<'EOF'
-          # 使用 OpenJDK 11 作为基础镜像
-          FROM eclipse-temurin:11-jre-alpine
-
-          # 设置工作目录
-          WORKDIR /app
-
-          # 复制 JAR 文件到容器
-          COPY target/*.jar app.jar
-
-          # 暴露应用端口
-          EXPOSE 8080
-
-          # 健康检查
-          HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
-            CMD wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1
-
-          # 启动应用
-          ENTRYPOINT ["java", "-jar", "/app/app.jar"]
-          EOF
-
-      # 步骤5：构建 Docker 镜像
+      # 步骤4：构建 Docker 镜像（使用项目中已有的 Dockerfile）
       - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ${{ env.PROJECT_DIR }}
-          file: ${{ env.PROJECT_DIR }}/Dockerfile
+          context: .
+          file: ./Dockerfile
           push: false
           tags: |
             ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
             ${{ env.DOCKER_IMAGE_NAME }}:latest
           load: true
 
-      # 步骤6：保存 Docker 镜像（可选，用于后续部署）
+      # 步骤5：保存 Docker 镜像（可选，用于后续部署）
       - name: Save Docker image
         run: |
           docker save ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} | gzip > docker-image.tar.gz
 
-      # 步骤7：上传 Docker 镜像
+      # 步骤6：上传 Docker 镜像
       - name: Upload Docker image
         uses: actions/upload-artifact@v4
         with:
@@ -183,7 +155,7 @@ jobs:
           path: docker-image.tar.gz
           retention-days: 5
 
-      # 步骤8：输出镜像信息
+      # 步骤7：输出镜像信息
       - name: Display Docker image info
         run: |
           echo "Docker image built successfully!"
